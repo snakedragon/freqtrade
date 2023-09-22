@@ -48,23 +48,25 @@ class PriceSpikeStrategy(IStrategy):
     # Minimal ROI designed for the strategy.
     # This attribute will be overridden if the config file contains "minimal_roi".
     minimal_roi = {
-        "30": 0.015,
-        "15": 0.03,
-        "0": 0.06
+        "10": 0.015,
+        "5": 0.03,
+        "3": 0.045,
+        "2": 0.06,
+        "1": 0.08,
+        "0": 0.15
     }
 
     # Optimal stoploss designed for the strategy.
     # This attribute will be overridden if the config file contains "stoploss".
-    stoploss = -0.05
-
+    stoploss = -0.03
     # Trailing stoploss
-    trailing_stop = False
-    # trailing_only_offset_is_reached = False
-    # trailing_stop_positive = 0.01
-    # trailing_stop_positive_offset = 0.0  # Disabled / not configured
+    trailing_stop = True
+    trailing_only_offset_is_reached = True
+    trailing_stop_positive = 0.02
+    trailing_stop_positive_offset = 0.05
 
     # Run "populate_indicators()" only for new candle.
-    process_only_new_candles = True
+    process_only_new_candles = False
 
     # These values can be overridden in the config.
     use_exit_signal = True
@@ -72,15 +74,15 @@ class PriceSpikeStrategy(IStrategy):
     ignore_roi_if_entry_signal = False
 
     # Number of candles the strategy requires before producing valid signals
-    startup_candle_count: int = 15
+    startup_candle_count: int = 10
 
     # Strategy parameters
-    price_spike_threshold_buy = DecimalParameter(1.0, 6.0, default=1.5, decimals=1, space='buy', optimize=True)
-    price_spike_threshold_sell = DecimalParameter(-6.0, -1.0, default=-1.5, decimals=1, space='sell', optimize=True)
+    price_spike_threshold_buy = DecimalParameter(0.5, 6.0, default=0.6, decimals=1, space='buy', optimize=True)
+    price_spike_threshold_sell = DecimalParameter(-6.0, -0.5, default=-0.6, decimals=1, space='sell', optimize=True)
 
     # Optional order type mapping.
     order_types = {
-        'entry': 'limit',
+        'entry': 'market',
         'exit': 'limit',
         'stoploss': 'market',
         'stoploss_on_exchange': False
@@ -91,7 +93,7 @@ class PriceSpikeStrategy(IStrategy):
         'entry': 'GTC',
         'exit': 'GTC'
     }
-    
+
     @property
     def plot_config(self):
         return {
@@ -142,7 +144,7 @@ class PriceSpikeStrategy(IStrategy):
         :param metadata: Additional information, like the currently traded pair
         :return: a Dataframe with all mandatory indicators for the strategies
         """
-        
+
         # Momentum Indicators
         # ------------------------------------
         # EMA - Exponential Moving Average
@@ -164,27 +166,35 @@ class PriceSpikeStrategy(IStrategy):
         """
         dataframe.loc[
             (
-                ((dataframe['close']-dataframe['close'].shift(2))/3 > self.price_spike_threshold_buy.value) &  # Signal: RSI crosses above buy_rsi
-                (dataframe['close'] >= dataframe['ema5']) &                     # Guard: close above ema5
-                (dataframe['close'] > dataframe['close'].shift(1)) &            # Guard: close is raising
-                (dataframe['close'].shift(1) > dataframe['close'].shift(2)) &   # Guard: close is raising
-                # (dataframe['close'].shift(2) > dataframe['close'].shift(3)) &   # Guard: close is raising
-                (dataframe['volume'] > 0)  # Make sure Volume is not 0
+                # (dataframe['close'] >= dataframe['ema5']) &                     # 站上3周期平均线
+                (dataframe['close'] >= dataframe['open']) &                     # k-0 bar 上涨
+                (dataframe['close'].shift(1) > dataframe['open'].shift(1)) &    # k-1 bar 上涨
+                (dataframe['close'].shift(2) > dataframe['open'].shift(2)) &    # k-2 bar 上涨
+                (dataframe['close'].shift(3) < dataframe['open'].shift(3)) &    # k-3 bar 下跌
+                (dataframe['close'] > dataframe['close'].shift(1)) &            # close价格上升
+                (dataframe['close'].shift(1) > dataframe['close'].shift(2)) &   # close价格上升
+                ((dataframe['close']-dataframe['open'].shift(2)) < 0.0075*self.price_spike_threshold_buy.value*dataframe['close']) &  # 上涨不能太快
+                ((dataframe['close']-dataframe['open'].shift(2)) > 0.001*self.price_spike_threshold_buy.value*dataframe['close']) &  # 上涨不能太慢
+                (dataframe['volume'] > 0)                                      # 有成交量
             ),
             'enter_long'] = 1
-        
-    
+
+
         dataframe.loc[
             (
-                ((dataframe['close']-dataframe['close'].shift(2))/3 < self.price_spike_threshold_sell.value) &  # Signal: RSI crosses above buy_rsi
-                (dataframe['close'] <= dataframe['ema5']) &                     # Guard: close above ema5
-                (dataframe['close'] < dataframe['close'].shift(1)) &            # Guard: close is decreasing
-                (dataframe['close'].shift(1) < dataframe['close'].shift(2)) &   # Guard: close is decreasing
-                # (dataframe['close'].shift(2) < dataframe['close'].shift(3)) &   # Guard: close is decreasing
-                (dataframe['volume'] > 0)  # Make sure Volume is not 0
+                # (dataframe['close'] < dataframe['ema5']) &                      # 落入3周期平均线
+                (dataframe['close'] < dataframe['open']) &                      # k-0 bar 下跌
+                (dataframe['close'].shift(1) < dataframe['open'].shift(1)) &    # k-1 bar 下跌
+                (dataframe['close'].shift(2) < dataframe['open'].shift(2)) &    # k-2 bar 下跌
+                (dataframe['close'].shift(3) > dataframe['open'].shift(3)) &    # k-3 bar 上涨
+                (dataframe['close'] < dataframe['close'].shift(1)) &            # close价格下跌
+                (dataframe['close'].shift(1) < dataframe['close'].shift(2)) &   # close价格下跌
+                ((dataframe['close']-dataframe['open'].shift(1)) > 0.0075*self.price_spike_threshold_buy.value*dataframe['close']) &  # 下跌不能太快
+                ((dataframe['close']-dataframe['open'].shift(1)) < 0.001*self.price_spike_threshold_buy.value*dataframe['close']) &  # 下跌不能太慢
+                (dataframe['volume'] > 0)                                      # 有成交量
             ),
             'enter_short'] = 1
-    
+
 
         return dataframe
 
@@ -215,4 +225,3 @@ class PriceSpikeStrategy(IStrategy):
             'exit_short'] = 1
         """
         return dataframe
-    

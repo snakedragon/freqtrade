@@ -7,6 +7,8 @@ import pandas as pd
 from pandas import DataFrame
 from datetime import datetime
 from typing import Optional, Union
+import sys
+sys.path.append("/home/al/source/freqtrade")
 
 from freqtrade.strategy import (BooleanParameter, CategoricalParameter, DecimalParameter,
                                 IntParameter, IStrategy, merge_informative_pair)
@@ -39,60 +41,13 @@ class PriceSpikeStrategy(IStrategy):
     # Check the documentation or the Sample strategy to get the latest version.
     INTERFACE_VERSION = 3
 
-    # Optimal timeframe for the strategy.
-    timeframe = '1m'
+    # 一轮波峰波谷的移动距离平均值， 大于这个值，可以买入，小于这个值，不买入。
+    buy_move_distance_round = DecimalParameter(0.001, 0.006, default=0.003, decimals=3, space='buy',optimize=True, load=True)
+    # 如果一个方向上，连续移动n个klines，可以开始进入信号评估
+    buy_move_klines_entry = IntParameter(2, 4, default=3, space='buy',optimize=True, load=True)
+    # 在一个方向上，buy_move_klines_entry满足的情况下， 移动距离为 平均移动距离的 0.2-0.6，可以进入信号评估
+    buy_move_distance_entry = DecimalParameter(0.2, 0.6, default=0.3, decimals=1, space='buy',optimize=True, load=True)
 
-    # Can this strategy go short?
-    can_short: bool = True
-
-    # Minimal ROI designed for the strategy.
-    # This attribute will be overridden if the config file contains "minimal_roi".
-    minimal_roi = {
-        "10": 0.015,
-        "5": 0.03,
-        "3": 0.045,
-        "2": 0.06,
-        "1": 0.08,
-        "0": 0.15
-    }
-
-    # Optimal stoploss designed for the strategy.
-    # This attribute will be overridden if the config file contains "stoploss".
-    stoploss = -0.03
-    # Trailing stoploss
-    trailing_stop = True
-    trailing_only_offset_is_reached = True
-    trailing_stop_positive = 0.02
-    trailing_stop_positive_offset = 0.05
-
-    # Run "populate_indicators()" only for new candle.
-    process_only_new_candles = False
-
-    # These values can be overridden in the config.
-    use_exit_signal = True
-    exit_profit_only = False
-    ignore_roi_if_entry_signal = False
-
-    # Number of candles the strategy requires before producing valid signals
-    startup_candle_count: int = 10
-
-    # Strategy parameters
-    price_spike_threshold_buy = DecimalParameter(0.5, 6.0, default=0.6, decimals=1, space='buy', optimize=True)
-    price_spike_threshold_sell = DecimalParameter(-6.0, -0.5, default=-0.6, decimals=1, space='sell', optimize=True)
-
-    # Optional order type mapping.
-    order_types = {
-        'entry': 'market',
-        'exit': 'limit',
-        'stoploss': 'market',
-        'stoploss_on_exchange': False
-    }
-
-    # Optional order time in force.
-    order_time_in_force = {
-        'entry': 'GTC',
-        'exit': 'GTC'
-    }
 
     @property
     def plot_config(self):
@@ -118,6 +73,113 @@ class PriceSpikeStrategy(IStrategy):
                  proposed_leverage: float, max_leverage: float, entry_tag: Optional[str],
                  side: str, **kwargs) -> float:
         return 100.0
+    
+
+    def calcualte_peak_vally_stats(self,dataframe: DataFrame,metadata:dict)-> DataFrame:
+            up_distance = []
+            down_distance = []
+
+            up_index_interval = []
+            down_index_interval = []
+
+            peak_df = dataframe.loc[(dataframe['peak_vally_bar']==1),:]
+            vally_df = dataframe.loc[(dataframe['peak_vally_bar']==-1),:]
+
+            start_index = peak_df.index[0] if peak_df.index[0] < vally_df.index[0] else vally_df.index[0]
+            peak_first = (peak_df.index[0] < vally_df.index[0])
+
+            if peak_first:
+                for i, peak_idx in enumerate(peak_df.index):
+                    peak_close_value = peak_df[peak_idx,'close']
+                    if i+1 > len(vally_df.index):
+                        break
+                    vally_idx = vally_df.index[i]
+                    if vally_idx < peak_idx:
+                        raise ValueError("vally idx must follow the peak idx in peak first  data mode!")
+                    vally_close_value = vally_df[vally_idx,'close']
+                    down_distance.append(2.0*abs(vally_close_value-peak_close_value)/(vally_close_value+peak_close_value))
+                    down_index_interval.append(vally_idx-peak_idx)
+
+                    if i+1>len(peak_df.index):
+                        break
+                    next_peak_idx = peak_df.index[i+1]
+                    next_peak_close_value = peak_df[next_peak_idx,'close']
+                    up_distance.append(2.0*abs(next_peak_close_value-vally_close_value)/(next_peak_close_value+vally_close_value))
+                    up_index_interval.append(next_peak_idx-vally_idx)
+            else:
+                for i, vally_idx in enumerate(vally_df.index):
+                    vally_close_value = vally_df[vally_idx,'close']
+                    if i+1 > len(peak_df.index):
+                        break
+                    peak_idx = peak_df.index[i]
+                    if vally_idx > peak_idx:
+                        raise ValueError("vally idx must follow the peak idx in vally first data mode!")
+                    peak_close_value = peak_df[peak_idx,'close']
+                    up_distance.append(2.0*abs(vally_close_value-peak_close_value)/(peak_close_value+vally_close_value))
+                    up_index_interval.append(peak_idx-vally_idx)
+                    if i+1>len(vally_df.index):
+                        break
+                    next_vally_idx = vally_df.index[i+1]
+                    next_vally_close_value = vally_df[next_vally_idx,'close']
+                    down_distance.append(2.0*abs(next_vally_close_value-peak_close_value)/(next_vally_close_value+peak_close_value))
+                    down_index_interval.append(next_vally_idx-peak_idx)
+                    
+
+            up_distance_avg = np.mean(up_distance)
+            down_distance_avg = np.mean(down_distance)
+            up_down_distance_avg = np.mean(up_distance+down_distance)
+            up_klines_avg = np.mean(up_index_interval)
+            down_klines_avg = np.mean(down_index_interval)
+            up_down_klines_avg = np.mean(up_index_interval + down_index_interval)
+
+            stats = {
+                'up_avg': up_distance_avg,
+                'down_avg': down_distance_avg,
+                'up_down_avg': up_down_distance_avg,
+                'up_kl_avg': up_klines_avg,
+                'down_kl_avg': down_klines_avg,
+                'up_down_kl_avg': up_down_klines_avg
+            }
+
+            return stats
+
+
+    def detect_klines_peak_vally_bar(self,dataframe: DataFrame, metadata:dict)-> DataFrame:
+        """
+        detect peak and vally bar use the 'close' value , 
+        if peak, mark as value 1, peak means current_bar > left_bar && current_bar > left_bar
+        vally marked as value -1, vally means current_bar < left_bar && current_bar < left_bar
+        """
+        dataframe['peak_vally_bar'] = 0
+        dataframe['high_close_avg'] = (0.2*dataframe['close'] + 0.8*dataframe['high'])
+
+        dataframe.loc[
+            (   
+                (dataframe['date'].values < dataframe['date'].values[-2]) &   # values before last two shift
+                (dataframe['high_close_avg'] > dataframe['high_close_avg'].shift(1)) &  # high_close 大于左一
+                (dataframe['high_close_avg'] > dataframe['high_close_avg'].shift(2)) &  # high_close 大于左二
+                (dataframe['high_close_avg'] > dataframe['high_close_avg'].shift(-1)) & # high_close 大于右一
+                (dataframe['high_close_avg'] > dataframe['high_close_avg'].shift(-2)) &   # high_close 大于右2
+                (dataframe['high_close_avg'].shift(1) > dataframe['high_close_avg'].shift(2)) & 
+                (dataframe['high_close_avg'].shift(-1) > dataframe['high_close_avg'].shift(-2))
+            ),
+            'peak_vally_bar'] = 1
+
+        dataframe.loc[
+            (
+                (dataframe['date'].values < dataframe['date'].values[-2]) &   # 取值后2之前
+                (dataframe['high_close_avg'] < dataframe['high_close_avg'].shift(1)) &  # high_close 小于左一
+                (dataframe['high_close_avg'] < dataframe['high_close_avg'].shift(2)) &  # high_close 小于左二
+                (dataframe['high_close_avg'] < dataframe['high_close_avg'].shift(-1)) & # high_close 小于右一
+                (dataframe['high_close_avg'] < dataframe['high_close_avg'].shift(-2)) &   # high_close 小于右2
+                (dataframe['high_close_avg'].shift(1) < dataframe['high_close_avg'].shift(2)) & 
+                (dataframe['high_close_avg'].shift(-1) < dataframe['high_close_avg'].shift(-2))
+            ),
+            'peak_vally_bar'
+        ] = -1
+
+        return dataframe
+        
 
 
     def informative_pairs(self):
@@ -155,6 +217,9 @@ class PriceSpikeStrategy(IStrategy):
         # dataframe['ema50'] = ta.EMA(dataframe, timeperiod=50)
         # dataframe['ema100'] = ta.EMA(dataframe, timeperiod=100)
 
+        dataframe = self.detect_klines_peak_vally_bar(dataframe,metadata)
+
+    
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -164,6 +229,17 @@ class PriceSpikeStrategy(IStrategy):
         :param metadata: Additional information, like the currently traded pair
         :return: DataFrame with entry columns populated
         """
+
+        stats = self.calcualte_peak_vally_stats(dataframe,metadata)
+
+        up_avg = stats['up_avg']
+        down_avg = stats['down_avg']
+        up_down_avg = stats['up_down_avg']
+        up_kl_avg = stats['up_kl_avg']
+        down_kl_avg = stats['down_kl_avg']
+        up_down_kl_avg = stats['up_down_kl_avg']
+
+
         dataframe.loc[
             (
                 # (dataframe['close'] >= dataframe['ema5']) &                     # 站上3周期平均线

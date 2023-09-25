@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../freqtrade-strategies"
+		}
+	],
+	"settings": {}
+}

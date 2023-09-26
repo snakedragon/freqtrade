@@ -48,6 +48,9 @@ class PriceSpikeStrategy(IStrategy):
     # 在一个方向上，buy_move_klines_entry满足的情况下， 移动距离为 平均移动距离的 0.2-0.6，可以进入信号评估
     buy_move_distance_entry = DecimalParameter(0.2, 0.6, default=0.3, decimals=1, space='buy',optimize=True, load=True)
 
+    buy_up_distance_raito = DecimalParameter(0.2, 3, default=0.6, decimals=1, space='buy',optimize=True, load=True)
+    buy_down_distance_ratio = DecimalParameter(0.2, 3, default=0.6, decimals=1, space='buy',optimize=True, load=True)
+
 
     @property
     def plot_config(self):
@@ -132,7 +135,12 @@ class PriceSpikeStrategy(IStrategy):
             down_klines_avg = np.mean(down_index_interval)
             up_down_klines_avg = np.mean(up_index_interval + down_index_interval)
 
+            up_distance_total = np.sum(up_distance)
+            down_distance_total = np.sum(down_distance)
+
             stats = {
+                'up_dist': up_distance_total,
+                'down_dist': down_distance_total,
                 'up_avg': up_distance_avg,
                 'down_avg': down_distance_avg,
                 'up_down_avg': up_down_distance_avg,
@@ -234,42 +242,55 @@ class PriceSpikeStrategy(IStrategy):
 
         up_avg = stats['up_avg']
         down_avg = stats['down_avg']
+
+        up_dist = stats['up_dist']
+        down_dist = stats['down_dist']
         up_down_avg = stats['up_down_avg']
         up_kl_avg = stats['up_kl_avg']
         down_kl_avg = stats['down_kl_avg']
         up_down_kl_avg = stats['up_down_kl_avg']
 
+        move_range = self.buy_move_distance_round.value
+        klines_entry = self.buy_move_klines_entry.value
+        move_range_entry_ratio = self.buy_move_distance_entry.value
+        move_range_entry = move_range_entry_ratio* move_range
 
-        dataframe.loc[
-            (
-                # (dataframe['close'] >= dataframe['ema5']) &                     # 站上3周期平均线
-                (dataframe['close'] >= dataframe['open']) &                     # k-0 bar 上涨
-                (dataframe['close'].shift(1) > dataframe['open'].shift(1)) &    # k-1 bar 上涨
-                (dataframe['close'].shift(2) > dataframe['open'].shift(2)) &    # k-2 bar 上涨
-                (dataframe['close'].shift(3) < dataframe['open'].shift(3)) &    # k-3 bar 下跌
-                (dataframe['close'] > dataframe['close'].shift(1)) &            # close价格上升
-                (dataframe['close'].shift(1) > dataframe['close'].shift(2)) &   # close价格上升
-                ((dataframe['close']-dataframe['open'].shift(2)) < 0.0075*self.price_spike_threshold_buy.value*dataframe['close']) &  # 上涨不能太快
-                ((dataframe['close']-dataframe['open'].shift(2)) > 0.001*self.price_spike_threshold_buy.value*dataframe['close']) &  # 上涨不能太慢
-                (dataframe['volume'] > 0)                                      # 有成交量
-            ),
-            'enter_long'] = 1
+        up_down_ratio = round(up_dist/down_dist,4)
+        up_dist_ratio  = self.buy_up_distance_raito.value
+        down_dist_ratio = self.buy_down_distance_ratio.value
 
 
-        dataframe.loc[
-            (
-                # (dataframe['close'] < dataframe['ema5']) &                      # 落入3周期平均线
-                (dataframe['close'] < dataframe['open']) &                      # k-0 bar 下跌
-                (dataframe['close'].shift(1) < dataframe['open'].shift(1)) &    # k-1 bar 下跌
-                (dataframe['close'].shift(2) < dataframe['open'].shift(2)) &    # k-2 bar 下跌
-                (dataframe['close'].shift(3) > dataframe['open'].shift(3)) &    # k-3 bar 上涨
-                (dataframe['close'] < dataframe['close'].shift(1)) &            # close价格下跌
-                (dataframe['close'].shift(1) < dataframe['close'].shift(2)) &   # close价格下跌
-                ((dataframe['close']-dataframe['open'].shift(1)) > 0.0075*self.price_spike_threshold_buy.value*dataframe['close']) &  # 下跌不能太快
-                ((dataframe['close']-dataframe['open'].shift(1)) < 0.001*self.price_spike_threshold_buy.value*dataframe['close']) &  # 下跌不能太慢
-                (dataframe['volume'] > 0)                                      # 有成交量
-            ),
-            'enter_short'] = 1
+
+
+        if up_avg > move_range and up_down_ratio > up_dist_ratio:
+            dataframe.loc[
+                (
+                    (dataframe['close'] >= dataframe['ema5']) &                     # 站上3周期平均线
+                    (dataframe['close'] >= dataframe['open']) &                     # k-0 bar 上涨
+                    (dataframe['close'].shift(1) > dataframe['open'].shift(1)) &    # k-1 bar 上涨
+                    (dataframe['close'].shift(2) > dataframe['open'].shift(2)) &    # k-2 bar 上涨
+                    (dataframe['close'].shift(3) < dataframe['open'].shift(3)) &    # k-3 bar 下跌
+                    (dataframe['close'] > dataframe['close'].shift(1)) &            # close0 > close1
+                    (dataframe['close'].shift(1) > dataframe['close'].shift(2)) &   # close1 > close2
+                    (dataframe['close']-dataframe['close'].shift(2) > move_range_entry) &  # 价格移动距离超过一定比例
+                    (dataframe['volume'] > 0)                                      # 有成交量
+                ),
+                'enter_long'] = 1
+
+        if down_avg > move_range and (1/up_down_ratio) > down_dist_ratio:
+            dataframe.loc[
+                (
+                    (dataframe['close'] < dataframe['ema5']) &                      # 落入3周期平均线
+                    (dataframe['close'] < dataframe['open']) &                      # k-0 bar 下跌
+                    (dataframe['close'].shift(1) < dataframe['open'].shift(1)) &    # k-1 bar 下跌
+                    (dataframe['close'].shift(2) < dataframe['open'].shift(2)) &    # k-2 bar 下跌
+                    (dataframe['close'].shift(3) > dataframe['open'].shift(3)) &    # k-3 bar 上涨
+                    (dataframe['close'] < dataframe['close'].shift(1)) &            # close价格下跌
+                    (dataframe['close'].shift(1) < dataframe['close'].shift(2)) &   # close价格下跌
+                    (dataframe['close'].shift(2)-dataframe['close'] > move_range_entry) &  # 价格移动距离超过一定比例
+                    (dataframe['volume'] > 0)                                      # 有成交量
+                ),
+                'enter_short'] = 1
 
 
         return dataframe

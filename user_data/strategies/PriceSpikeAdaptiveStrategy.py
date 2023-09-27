@@ -20,7 +20,7 @@ import pandas_ta as pta
 from technical import qtpylib
 
 
-class PriceSpikeStrategy(IStrategy):
+class PriceSpikeAdaptiveStrategy(IStrategy):
     """
     This is a strategy template to get you started.
     More information in https://www.freqtrade.io/en/latest/strategy-customization/
